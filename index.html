@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>MoveNet Pose Game</title>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection"></script>
+  <style>
+    html, body { margin:0; padding:0; background:black; color:white; font-family:sans-serif; overflow:hidden; }
+    #video, #canvas { position:absolute; top:0; left:0; width:100vw; height:100vh; object-fit:cover; }
+    #video { display:none; }
+    #controls { position:fixed; top:10px; left:10px; z-index:10; }
+    .btn { margin:5px; padding:10px 15px; font-size:16px; border:none; border-radius:5px; }
+    #thumbnails { position:fixed; top:10px; right:10px; z-index:10; display:flex; flex-direction:column; }
+    .thumb { width:60px; height:60px; margin-bottom:5px; border:2px solid white; object-fit:cover; }
+    #info { position:fixed; bottom:10px; left:10px; background:rgba(0,0,0,0.5); padding:10px; border-radius:5px; z-index:10; }
+    #messageOverlay, #similarity { position:fixed; left:50%; transform:translateX(-50%); z-index:20; text-align:center; }
+    #messageOverlay { top:50%; transform:translate(-50%,-50%); font-size:48px; color:white; background:rgba(0,0,0,0.7); padding:20px; border-radius:10px; display:none; }
+    #similarity { top:120px; font-size:36px; color:yellow; }
+    #flashOverlay { position:fixed; top:0; left:0; width:100vw; height:100vh; background:white; opacity:0; pointer-events:none; transition:opacity 0.3s ease; z-index:15; }
+  </style>
+</head>
+<body>
+  <video id="video" autoplay playsinline muted></video>
+  <canvas id="canvas"></canvas>
+  <div id="controls">
+    <button id="captureBtn" class="btn">Capture Pose (0/5)</button>
+  </div>
+  <div id="thumbnails"></div>
+  <div id="info">Pose: 0/5 | Time: --s | Score: 0/100</div>
+  <div id="messageOverlay"></div>
+  <div id="flashOverlay"></div>
+  <div id="similarity">Similarity: --%</div>
+<script>
+(async () => {
+  // Audio context
+  const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  const playBeep = (freq, dur) => {
+    const o = audioCtx.createOscillator(); const g = audioCtx.createGain();
+    o.connect(g); g.connect(audioCtx.destination);
+    o.frequency.value = freq; o.type = 'sine'; o.start();
+    g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + dur/1000);
+    setTimeout(() => o.stop(), dur);
+  };
+  const playJingle = () => { playBeep(880, 120); setTimeout(() => playBeep(660,120), 150); };
+
+  // DOM
+  const video = document.getElementById('video');
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d');
+  const capBtn = document.getElementById('captureBtn');
+  const thumbs = document.getElementById('thumbnails');
+  const info = document.getElementById('info');
+  const overlay = document.getElementById('messageOverlay');
+  const flash = document.getElementById('flashOverlay');
+  const simDiv = document.getElementById('similarity');
+
+  // State and config
+  const detector = await poseDetection.createDetector(poseDetection.SupportedModels.MoveNet);
+  await (await navigator.mediaDevices.getUserMedia({ video:{facingMode:'user'} })).getTracks();
+  video.srcObject = await navigator.mediaDevices.getUserMedia({ video:{facingMode:'user'} });
+  await new Promise(r => video.onloadedmetadata = r);
+  video.play(); canvas.width = innerWidth; canvas.height = innerHeight;
+  const skeleton = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,11],[11,13],[13,15],[6,12],[12,14],[14,16],[11,12]];
+  let refs = [], phase='capture', idx=0, score=0, timerId, tLeft;
+  const total=5, thresh=0.1, reqF=1;
+
+  const show = msg => { overlay.textContent=msg; overlay.style.display='block'; setTimeout(() => overlay.style.display='none', 1500); };
+  const flashScreen = () => { flash.style.opacity=1; setTimeout(()=>flash.style.opacity=0, 200); };
+  const updateInfo = () => {
+    info.textContent = phase==='capture'
+      ? `Pose: ${refs.length}/${total} | Time: --s | Score: ${Math.round(score)}/100`
+      : phase==='test'
+      ? `Pose: ${idx+1}/${total} | Time: ${tLeft}s | Score: ${Math.round(score)}/100`
+      : `Game Over! Score: ${Math.round(score)}/100`;
+  };
+  updateInfo();
+
+  const drawSkeleton = (pts,{color,width,radius})=>{
+    ctx.lineWidth=width; ctx.strokeStyle=color; ctx.fillStyle=color;
+    const sx=canvas.width/video.videoWidth, sy=canvas.height/video.videoHeight;
+    skeleton.forEach(([i,j])=>{ const a=pts[i], b=pts[j]; if(a.score>0.5&&b.score>0.5){
+      ctx.beginPath(); ctx.moveTo(a.x*sx,a.y*sy); ctx.lineTo(b.x*sx,b.y*sy); ctx.stroke(); }});
+    pts.forEach(p=>{ if(p.score>0.5){ ctx.beginPath(); ctx.arc(p.x*sx,p.y*sy,radius,0,2*Math.PI); ctx.fill(); }});
+  };
+
+  async function capture() {
+    const res = await detector.estimatePoses(video);
+    if(res[0]?.keypoints) {
+      refs.push(res[0].keypoints);
+      addThumb(res[0].keypoints);
+      updateInfo();
+      if(refs.length===total) { phase='test'; capBtn.style.display='none'; show(`Get ready for Pose 1!`); startTest(); }
+    }
+  }
+  capBtn.onclick = capture;
+
+  const addThumb = pts => {
+    const c=document.createElement('canvas'),t=c.getContext('2d'); c.width=60; c.height=60;
+    t.drawImage(video,0,0,video.videoWidth,video.videoHeight,0,0,60,60);
+    skeleton.forEach(([i,j])=>{ const a=pts[i], b=pts[j]; if(a.score>0.5&&b.score>0.5){ t.lineWidth=2; t.strokeStyle='lime'; t.beginPath(); t.moveTo(a.x*60,a.y*60); t.lineTo(b.x*60,b.y*60); t.stroke(); }});
+    pts.forEach(p=>{ if(p.score>0.5){ t.fillStyle='red'; t.beginPath(); t.arc(p.x*60,p.y*60,4,0,2*Math.PI); t.fill(); }});
+    const img=new Image(); img.src=c.toDataURL(); img.className='thumb'; thumbs.appendChild(img);
+  };
+
+  function startTest(){ idx=0; score=0; tLeft=10; phase='test'; updateInfo(); playBeep(880,200); show(`Pose 1`); runTimer(); }
+  function runTimer(){ timerId=setInterval(()=>{ tLeft--; updateInfo(); if(tLeft<=0){ clearInterval(timerId); playBeep(200,400); flashScreen(); nextTest(); } },1000); }
+  function nextTest(){ idx++; if(idx<total){ tLeft=10; updateInfo(); playBeep(880,200); show(`Pose ${idx+1}`); runTimer(); } else { phase='done'; clearInterval(timerId); updateInfo(); playBeep(660,400); flashScreen(); alert(`Game Over! Score: ${Math.round(score)}/100`); } }
+
+  async function drawLoop() {
+    const res = await detector.estimatePoses(video);
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    ctx.drawImage(video,0,0,canvas.width,canvas.height);
+    if(res[0]?.keypoints) {
+      if(phase==='test') drawSkeleton(refs[idx],{color:'white',width:10,radius:14});
+      drawSkeleton(res[0].keypoints,{color:'lime',width:6,radius:10});
+      if(phase==='test') checkMatch(res[0].keypoints);
+    }
+    requestAnimationFrame(drawLoop);
+  }
+  drawLoop();
+
+  let sf=0;
+  function checkMatch(kp) {
+    const valid=kp.filter(p=>p.score>0.5), len=valid.length;
+    let match=0;
+    valid.forEach((p,i)=>{ if(Math.abs(p.x-refs[idx][i].x)<thresh && Math.abs(p.y-refs[idx][i].y)<thresh) match++; });
+    const pct=len? match/len:0; simDiv.textContent=`Similarity: ${Math.round(pct*100)}%`;
+    if(pct>=thresh) sf++; else sf=0;
+    if(sf>=reqF) { clearInterval(timerId); playJingle(); flashScreen(); score+=20; sf=0; nextTest(); }
+  }
+})();
+</script>
+</body>
+</html>
